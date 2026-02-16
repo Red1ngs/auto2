@@ -1,4 +1,4 @@
-"""Парсер владельцев карт с механизмом повторных попыток и черным списком."""
+"""Парсер владельцев карт с НЕМЕДЛЕННЫМ ПРЕРЫВАНИЕМ при буст/смене карты."""
 
 import random
 import re
@@ -64,7 +64,7 @@ class OwnersParser:
         if lock_icons:
             return False
         
-        # 🔧 НОВОЕ: Проверяем handshake (блокировка обменов)
+        # Проверяем handshake (блокировка обменов)
         handshake_icons = owner_element.select('.card-show__owner-icon--block .icon-handshake, .card-show__owner-icon .icon-handshake')
         if handshake_icons:
             return False
@@ -115,10 +115,6 @@ class OwnersParser:
             
             has_next = self._has_next_page(soup)
             
-            # Логируем фильтрацию
-            if len(available_owners) < len(owner_elements) - start_index:
-                filtered = len(owner_elements) - start_index - len(available_owners)
-            
             return available_owners, has_next
             
         except requests.RequestException:
@@ -135,9 +131,9 @@ class OwnersParser:
         return False
 
 class OwnersProcessor:
-    """Процессор для обработки владельцев с механизмом повторных попыток."""
+    """Процессор для обработки владельцев с НЕМЕДЛЕННЫМ ПРЕРЫВАНИЕМ."""
     
-    MAX_RETRY_ATTEMPTS = 3  # Максимум попыток с разными картами
+    MAX_RETRY_ATTEMPTS = 3
     
     def __init__(
         self,
@@ -181,6 +177,34 @@ class OwnersProcessor:
             delay = random.uniform(TRADE_RANDOM_DELAY_MIN, TRADE_RANDOM_DELAY_MAX)
             time.sleep(delay)
     
+    # ========================================================================
+    # 🔧 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверка прерывания
+    # ========================================================================
+    def _check_interruption(self, monitor_obj, context: str = "") -> bool:
+        """
+        Проверяет необходимость прерывания обработки.
+        
+        Args:
+            monitor_obj: Объект монитора
+            context: Контекст для сообщения (например, "перед владельцем 5/10")
+        
+        Returns:
+            True если нужно прервать обработку
+        """
+        if not monitor_obj:
+            return False
+        
+        if not hasattr(monitor_obj, 'should_interrupt'):
+            # Старая версия монитора без метода should_interrupt
+            return monitor_obj.card_changed if hasattr(monitor_obj, 'card_changed') else False
+        
+        if monitor_obj.should_interrupt():
+            reason = monitor_obj.get_interrupt_reason()
+            print(f"\n⚡ ПРЕРЫВАНИЕ {context}: {reason}!")
+            return True
+        
+        return False
+    
     def process_owner_with_retry(
         self,
         owner: Owner,
@@ -194,6 +218,8 @@ class OwnersProcessor:
         """
         Обрабатывает владельца с до 3 попыток разными картами.
         
+        🔧 ИСПРАВЛЕНО: Проверка прерывания перед КАЖДОЙ попыткой
+        
         Returns:
             (успех обмена, нужно прервать обработку)
         """
@@ -201,15 +227,19 @@ class OwnersProcessor:
         if self.blacklist_manager.is_blacklisted(owner.id):
             return False, False
         
-        if monitor_obj and monitor_obj.card_changed:
-            print(f"\n⚠️  Карта изменилась! Прерываем обработку владельца {owner.name}")
+        # ====================================================================
+        # 🔧 ПРОВЕРКА #1: Перед началом обработки владельца
+        # ====================================================================
+        if self._check_interruption(monitor_obj, f"перед владельцем {owner.name}"):
             return False, True
         
         exclude_instances = self.failed_attempts_set.copy()
         
         for attempt in range(1, self.MAX_RETRY_ATTEMPTS + 1):
-            if monitor_obj and monitor_obj.card_changed:
-                print(f"\n⚠️  Карта изменилась во время попытки {attempt}")
+            # ================================================================
+            # 🔧 ПРОВЕРКА #2: Перед каждой попыткой retry
+            # ================================================================
+            if self._check_interruption(monitor_obj, f"перед попыткой {attempt}/{self.MAX_RETRY_ATTEMPTS}"):
                 return False, True
             
             # Передаем exclude_instances для исключения проваленных карт
@@ -242,8 +272,10 @@ class OwnersProcessor:
             
             self._wait_before_trade()
             
-            if monitor_obj and monitor_obj.card_changed:
-                print(f"\n⚠️  Карта изменилась перед отправкой")
+            # ================================================================
+            # 🔧 ПРОВЕРКА #3: Перед отправкой обмена
+            # ================================================================
+            if self._check_interruption(monitor_obj, "перед отправкой обмена"):
                 return False, True
             
             success = self.send_trade_func(
@@ -287,6 +319,11 @@ class OwnersProcessor:
         output_dir: str,
         monitor_obj=None
     ) -> int:
+        """
+        Обрабатывает владельцев постранично.
+        
+        🔧 ИСПРАВЛЕНО: Проверка прерывания перед КАЖДОЙ страницей и владельцем
+        """
         total_processed = 0
         total_trades_sent = 0
         page = 1
@@ -298,12 +335,18 @@ class OwnersProcessor:
         blacklist_info = self.blacklist_manager.get_blacklist_info()
         if blacklist_info['count'] > 0:
             print(f"🚫 Черный список активен: {blacklist_info['count']} пользователей")
+        
+        # Показываем статус мониторинга
+        if monitor_obj and hasattr(monitor_obj, 'should_interrupt'):
+            print(f"🔔 Мониторинг активен: будет прерывать при буст/смене карты")
+        
         print()
         
         while True:
-            # Проверяем флаг замены карты ПЕРЕД каждой страницей
-            if monitor_obj and monitor_obj.card_changed:
-                print("\n🔄 Обнаружена новая карта! Прерываем обработку страницы...")
+            # ================================================================
+            # 🔧 ПРОВЕРКА #1: Перед загрузкой каждой страницы
+            # ================================================================
+            if self._check_interruption(monitor_obj, f"перед страницей {page}"):
                 return total_processed
             
             owners, has_next = self.parser.find_owners_on_page(card_id, page)
@@ -312,9 +355,10 @@ class OwnersProcessor:
                 print(f"📊 Страница {page}: найдено владельцев - {len(owners)}")
                 
                 for idx, owner in enumerate(owners, 1):
-                    # Проверяем флаг ПЕРЕД каждым владельцем
-                    if monitor_obj and monitor_obj.card_changed:
-                        print("\n🔄 Обнаружена новая карта! Прерываем обработку владельца...")
+                    # ============================================================
+                    # 🔧 ПРОВЕРКА #2: Перед каждым владельцем
+                    # ============================================================
+                    if self._check_interruption(monitor_obj, f"перед владельцем {idx}/{len(owners)} на странице {page}"):
                         return total_processed
                     
                     success, should_break = self.process_owner_with_retry(
@@ -328,7 +372,7 @@ class OwnersProcessor:
                     )
                     
                     if should_break:
-                        print("\n🔄 Прерывание обработки для перезапуска с новой картой...")
+                        print("\n⚡ Прерывание обработки для перезапуска с новой картой!")
                         return total_processed
                     
                     if success:
@@ -344,9 +388,10 @@ class OwnersProcessor:
                 print(f"   Отправлено обменов: {total_trades_sent}")
                 break
             
-            # Проверяем флаг ПЕРЕД переходом на следующую страницу
-            if monitor_obj and monitor_obj.card_changed:
-                print("\n🔄 Обнаружена новая карта! Прерываем перед следующей страницей...")
+            # ================================================================
+            # 🔧 ПРОВЕРКА #3: Перед переходом на следующую страницу
+            # ================================================================
+            if self._check_interruption(monitor_obj, f"перед переходом со страницы {page} на {page+1}"):
                 return total_processed
             
             time.sleep(PAGE_DELAY)
