@@ -43,7 +43,7 @@ from utils import (
 )
 
 class MangaBuffApp:
-    """Главное приложение MangaBuff v2.8 - режим сна вместо ожидания."""
+    """Главное приложение MangaBuff v2.8.1 - ИСПРАВЛЕНА ПРОБЛЕМА СО СМЕНОЙ КАРТЫ."""
     
     MAX_FAILED_CYCLES = 3
     
@@ -64,7 +64,7 @@ class MangaBuffApp:
     
     def setup(self) -> bool:
         self.logger.info("=" * 70)
-        self.logger.info("Инициализация приложения MangaBuff v2.8")
+        self.logger.info("Инициализация приложения MangaBuff v2.8.1")
         self.logger.info("=" * 70)
         
         ensure_dir_exists(self.output_dir)
@@ -488,9 +488,17 @@ class MangaBuffApp:
             print_warning("❌ Замена не удалась\n")
             return None
     
+    # ============================================================================
+    # 🔧 ИСПРАВЛЕНИЕ КРИТИЧЕСКОЙ ОШИБКИ: Смена карты
+    # ============================================================================
     def run_processing_mode(self, boost_card: dict):
         self.init_processor()
         self.logger.info("Запуск режима обработки владельцев")
+        
+        # ========================================================================
+        # 🔧 ИСПРАВЛЕНИЕ #1: Используем переменную вместо загрузки из файла
+        # ========================================================================
+        current_boost_card = boost_card
         
         # Бесконечный цикл работы
         while True:
@@ -530,7 +538,11 @@ class MangaBuffApp:
                 # Продолжаем с начала цикла
                 continue
             
-            current_boost_card = self._load_current_boost_card(boost_card)
+            # ========================================================================
+            # 🔧 ИСПРАВЛЕНИЕ #2: НЕ загружаем из файла, используем переменную!
+            # ========================================================================
+            # БЫЛО: current_boost_card = self._load_current_boost_card(boost_card)
+            # СТАЛО: используем current_boost_card напрямую
             current_card_id = current_boost_card['card_id']
             
             if self.failed_cycles_count >= self.MAX_FAILED_CYCLES:
@@ -543,8 +555,16 @@ class MangaBuffApp:
                 )
                 
                 if new_card:
+                    # ====================================================================
+                    # 🔧 ИСПРАВЛЕНИЕ #3: Сохраняем новую карту в файл!
+                    # ====================================================================
                     current_boost_card = new_card
                     current_card_id = new_card['card_id']
+                    
+                    # КРИТИЧЕСКИ ВАЖНО: Сохраняем в файл!
+                    save_json(f"{self.output_dir}/{BOOST_CARD_FILE}", new_card)
+                    self.logger.info(f"✅ Новая карта сохранена в {BOOST_CARD_FILE}")
+                    print(f"💾 Новая карта ID={new_card['card_id']} сохранена в файл")
                     
                     if self.monitor:
                         self.monitor.current_card_id = current_card_id
@@ -571,8 +591,17 @@ class MangaBuffApp:
 
             if new_card:
                 self.logger.info(f"Карта заменена автоматически: {new_card.get('card_id')}")
+                
+                # ====================================================================
+                # 🔧 ИСПРАВЛЕНИЕ #3: Сохраняем новую карту в файл!
+                # ====================================================================
                 current_boost_card = new_card
                 current_card_id = new_card['card_id']
+                
+                # КРИТИЧЕСКИ ВАЖНО: Сохраняем в файл!
+                save_json(f"{self.output_dir}/{BOOST_CARD_FILE}", new_card)
+                self.logger.info(f"✅ Новая карта сохранена в {BOOST_CARD_FILE}")
+                print(f"💾 Новая карта ID={new_card['card_id']} сохранена в файл")
                 
                 if self.monitor:
                     self.monitor.current_card_id = current_card_id
@@ -623,6 +652,9 @@ class MangaBuffApp:
                 self.logger.warning("Нет доступных владельцев")
                 print_warning("Нет доступных владельцев")
             
+            # ====================================================================
+            # 🔧 ИСПРАВЛЕНИЕ #4: После буста обновляем карту из файла
+            # ====================================================================
             if self._should_restart():
                 boost_happened_this_cycle = True
                 self.processor.reset_state()
@@ -630,6 +662,15 @@ class MangaBuffApp:
                 self.logger.info("Буст произошел - перезапуск с новой картой")
                 print_success("✅ Буст произошел - счетчик неудачных циклов сброшен")
                 self._prepare_restart()
+                
+                # Загружаем новую карту после буста
+                self.logger.info("Загрузка новой карты после буста...")
+                current_boost_card = self.load_boost_card()
+                if not current_boost_card:
+                    self.logger.error("Не удалось загрузить карту после буста")
+                    print_error("❌ Не удалось загрузить карту после буста")
+                    break
+                
                 time.sleep(1)
                 continue
             
@@ -643,6 +684,15 @@ class MangaBuffApp:
                     self.logger.info("Буст произошел во время ожидания")
                     print_success("✅ Буст произошел - счетчик неудачных циклов сброшен")
                     self._prepare_restart()
+                    
+                    # Загружаем новую карту после буста
+                    self.logger.info("Загрузка новой карты после буста...")
+                    current_boost_card = self.load_boost_card()
+                    if not current_boost_card:
+                        self.logger.error("Не удалось загрузить карту после буста")
+                        print_error("❌ Не удалось загрузить карту после буста")
+                        break
+                    
                     time.sleep(1)
                     continue
                 else:
@@ -686,6 +736,10 @@ class MangaBuffApp:
                 continue
     
     def _load_current_boost_card(self, default: dict) -> dict:
+        """
+        УСТАРЕЛО: Этот метод больше не используется в run_processing_mode.
+        Оставлен для совместимости с другими частями кода.
+        """
         path = f"{self.output_dir}/{BOOST_CARD_FILE}"
         current = load_json(path, default=default)
         return current if current else default
@@ -757,7 +811,7 @@ class MangaBuffApp:
 
 def create_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="MangaBuff v2.8 - режим сна вместо ожидания"
+        description="MangaBuff v2.8.1 - ИСПРАВЛЕНА ПРОБЛЕМА СО СМЕНОЙ КАРТЫ"
     )
     
     parser.add_argument("--email", required=True, help="Email")
@@ -786,7 +840,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
 def main():
     print("=" * 70)
-    print("MangaBuff v2.8 - Starting...")
+    print("MangaBuff v2.8.1 - ИСПРАВЛЕНА ПРОБЛЕМА СО СМЕНОЙ КАРТЫ")
     print("=" * 70)
     print()
     
@@ -804,7 +858,7 @@ def main():
     
     logger = get_logger()
     logger.info("=" * 70)
-    logger.info("MangaBuff v2.8 - Запуск приложения")
+    logger.info("MangaBuff v2.8.1 - Запуск приложения")
     logger.info("=" * 70)
     logger.info(f"Уровень логирования: {args.log_level}")
     logger.info(f"Console output: {not args.no_console_log}")
